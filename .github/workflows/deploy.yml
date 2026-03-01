@@ -66,3 +66,8 @@ jobs:
       - name: Start application
         run: |
           ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "systemctl daemon-reload && systemctl restart url-shortener.service"
+      - name: Smoke check
+        run: |
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "\
+          systemctl status url-shortener --no-pager -l && \
+          curl --fail http://127.0.0.1:8082/health"
