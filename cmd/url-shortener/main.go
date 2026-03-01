@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"url-shortener/internal/config"
+	"url-shortener/internal/storage/postgres"
 	"url-shortener/internal/storage/sqlite"
 
 	"github.com/go-chi/chi/v5"
@@ -31,23 +33,21 @@ func main() {
 	// TODO: init logger
 	log := setupLogger(cfg.Env)
 
-	log.Info("config loaded", "env", cfg.Env, "storage_path", cfg.StoragePath, "http_server", fmt.Sprintf("%+v", cfg.HTTPServer))
+	log.Info("config loaded",
+		"env", cfg.Env,
+		"storage_type", cfg.StorageType,
+		"storage_path", cfg.StoragePath,
+		"http_server", fmt.Sprintf("%+v", cfg.HTTPServer),
+	)
 	log.Debug("debug log")
-	log.Error("err log")
 	// TODO: init storage
-
-	storage, err := sqlite.New(cfg.StoragePath)
+	storage, err := initStorage(cfg)
 
 	if err != nil {
 		log.Error("failed to init storage", "error", err)
 		os.Exit(1)
 	}
-
-	err = storage.DeleteURL("test")
-
-	if err != nil {
-		log.Error("failed to get url", "error", err)
-	}
+	defer storage.Close()
 
 	// TODO: init rouder
 
@@ -61,15 +61,23 @@ func main() {
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.URLFormat)
 
-	router.Post("/url", save.New(log, storage))
-	router.Get("/{alias}", redirect.New(log, storage))
-	router.Delete("/{alias}", delete.New(log, storage))
+	router.Route("/url", func(r chi.Router) {
+		r.Use(middleware.BasicAuth("url-shortener", map[string]string{
+			cfg.HTTPServer.User: cfg.HTTPServer.Password,
+		}))
 
-	log.Info("starting server", slog.String("address", cfg.Address))
+		r.Post("/", save.New(log, storage))
+		r.Delete("/{alias}", delete.New(log, storage))
+
+	})
+
+	router.Get("/{alias}", redirect.New(log, storage))
+
+	log.Info("starting server", slog.String("address", cfg.HTTPServer.Address))
 
 	// TODO: run server
 	srv := &http.Server{
-		Addr:         cfg.Address,
+		Addr:         cfg.HTTPServer.Address,
 		Handler:      router,
 		ReadTimeout:  cfg.HTTPServer.Timeout,
 		WriteTimeout: cfg.HTTPServer.Timeout,
@@ -77,7 +85,7 @@ func main() {
 	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Error("failed to start server")
+		log.Error("failed to start server", "error", err)
 	}
 
 	log.Error("server stopped")
@@ -102,4 +110,25 @@ func setupLogger(env string) *slog.Logger {
 	}
 
 	return log
+}
+
+type URLStorage interface {
+	SaveURL(alias, urlToSave string) (int64, error)
+	GetURL(alias string) (string, error)
+	DeleteURL(alias string) error
+	Close() error
+}
+
+func initStorage(cfg *config.Config) (URLStorage, error) {
+	switch strings.ToLower(cfg.StorageType) {
+	case "sqlite":
+		if cfg.StoragePath == "" {
+			return nil, fmt.Errorf("storage_path is required for sqlite storage")
+		}
+		return sqlite.New(cfg.StoragePath)
+	case "postgres":
+		return postgres.New(cfg.Postgres.ConnString())
+	default:
+		return nil, fmt.Errorf("unknown storage type: %s", cfg.StorageType)
+	}
 }
